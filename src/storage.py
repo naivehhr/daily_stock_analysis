@@ -42,6 +42,7 @@ from sqlalchemy import (
     desc,
     event,
     func,
+    text,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import (
@@ -244,6 +245,12 @@ class AnalysisHistory(Base):
     stop_loss = Column(Float)
     take_profit = Column(Float)
 
+    # 智能盯盘策略相关字段
+    position_advice = Column(String(16))  # 仓位建议: empty/light/half/heavy/full
+    support_levels = Column(Text)  # JSON: 支撑位 [1850.5, 1820.3]
+    resistance_levels = Column(Text)  # JSON: 压力位 [1920.0, 1950.0]
+    breakout_analysis = Column(Text)  # JSON: 突破分析结果
+
     created_at = Column(DateTime, default=datetime.now, index=True)
 
     __table_args__ = (
@@ -269,6 +276,10 @@ class AnalysisHistory(Base):
             'secondary_buy': self.secondary_buy,
             'stop_loss': self.stop_loss,
             'take_profit': self.take_profit,
+            'position_advice': self.position_advice,
+            'support_levels': self.support_levels,
+            'resistance_levels': self.resistance_levels,
+            'breakout_analysis': self.breakout_analysis,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -624,6 +635,52 @@ class LLMUsage(Base):
     called_at = Column(DateTime, default=datetime.now, index=True)
 
 
+class MonitorHistory(Base):
+    """
+    盯盘监控历史记录
+    
+    存储每次监控触发的分析结果，支持回溯查询和信号追踪
+    """
+    __tablename__ = 'monitor_history'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_code = Column(String(16), nullable=False, index=True)
+    triggered_at = Column(DateTime, nullable=False, index=True)
+    signal_types = Column(Text, nullable=False, default='[]')  # JSON array
+    summary = Column(Text, default='')
+    report_json = Column(Text, nullable=False)  # 完整的 MonitorResult JSON
+    notified = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.now)
+    
+    # 复合索引：按股票和时间查询
+    __table_args__ = (
+        Index('idx_monitor_stock_time', 'stock_code', 'triggered_at'),
+    )
+
+
+class MonitorRules(Base):
+    """
+    盯盘监控规则配置（预留，用于未来定时任务）
+    
+    存储用户配置的监控规则，支持定时自动监控
+    """
+    __tablename__ = 'monitor_rules'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(64), nullable=True, index=True)  # 多用户支持预留
+    stock_code = Column(String(16), nullable=False)
+    indicators = Column(Text, nullable=False)  # JSON array
+    custom_rules = Column(Text, nullable=True)  # JSON object
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    
+    # 唯一约束：每个用户对每只股票只能有一个规则
+    __table_args__ = (
+        UniqueConstraint('user_id', 'stock_code', name='uq_user_stock_rule'),
+    )
+
+
 class DatabaseManager:
     """
     数据库管理器 - 单例模式
@@ -691,12 +748,58 @@ class DatabaseManager:
         
         # 创建所有表
         Base.metadata.create_all(self._engine)
+        
+        # 执行数据库迁移（添加缺失的列）
+        self._migrate_database()
 
         self._initialized = True
         logger.info(f"数据库初始化完成: {db_url}")
 
         # 注册退出钩子，确保程序退出时关闭数据库连接
         atexit.register(DatabaseManager._cleanup_engine, self._engine)
+    
+    def _migrate_database(self) -> None:
+        """
+        数据库迁移：为已存在的表添加缺失的列
+        
+        解决 ORM 模型新增字段后，旧数据库表缺少对应列的问题
+        """
+        if not self._is_sqlite_engine:
+            return
+        
+        try:
+            # 注意：此时 _initialized 还未设置为 True，不能调用 get_session()
+            session = self._SessionLocal()
+            try:
+                # 检查 analysis_history 表的列
+                result = session.execute(
+                    text("PRAGMA table_info(analysis_history)")
+                )
+                existing_columns = {row[1] for row in result.fetchall()}
+                
+                # 定义需要添加的列及其类型
+                columns_to_add = {
+                    'position_advice': 'VARCHAR(16)',
+                    'support_levels': 'TEXT',
+                    'resistance_levels': 'TEXT',
+                    'breakout_analysis': 'TEXT',
+                }
+                
+                for column_name, column_type in columns_to_add.items():
+                    if column_name not in existing_columns:
+                        logger.info(f"添加缺失的列: analysis_history.{column_name}")
+                        session.execute(
+                            text(f"ALTER TABLE analysis_history ADD COLUMN {column_name} {column_type}")
+                        )
+                        logger.info(f"成功添加列: {column_name}")
+                
+                session.commit()
+            finally:
+                session.close()
+                
+        except Exception as e:
+            logger.error(f"数据库迁移失败: {e}", exc_info=True)
+            # 迁移失败不影响系统运行，只是记录错误
     
     @classmethod
     def get_instance(cls) -> 'DatabaseManager':
@@ -2108,6 +2211,80 @@ class DatabaseManager:
                 for r in by_model_rows
             ],
         }
+
+    # === 盯盘监控相关方法 ===
+
+    def save_monitor_history(
+        self,
+        stock_code: str,
+        triggered_at: datetime,
+        signal_types: List[str],
+        summary: str,
+        report_json: str,
+        notified: bool = True,
+    ) -> int:
+        """
+        保存监控历史记录
+
+        Args:
+            stock_code: 股票代码
+            triggered_at: 触发时间
+            signal_types: 信号类型列表
+            summary: 分析摘要
+            report_json: 完整的 MonitorResult JSON 字符串
+            notified: 是否已发送通知
+
+        Returns:
+            新记录的 ID
+        """
+        import json as json_module
+
+        with self.session_scope() as session:
+            record = MonitorHistory(
+                stock_code=stock_code,
+                triggered_at=triggered_at,
+                signal_types=json_module.dumps(signal_types),
+                summary=summary,
+                report_json=report_json,
+                notified=notified,
+            )
+            session.add(record)
+            session.flush()
+            return record.id
+
+    def get_monitor_history(
+        self,
+        stock_code: Optional[str] = None,
+        limit: int = 20,
+        days: int = 7,
+    ) -> List[MonitorHistory]:
+        """
+        获取监控历史记录
+
+        Args:
+            stock_code: 股票代码（可选，不传则返回所有）
+            limit: 返回记录数量限制
+            days: 查询最近 N 天的记录
+
+        Returns:
+            监控历史记录列表
+        """
+        from datetime import timedelta
+
+        cutoff = datetime.now() - timedelta(days=days)
+
+        with self.get_session() as session:
+            query = select(MonitorHistory).where(
+                MonitorHistory.triggered_at >= cutoff
+            )
+
+            if stock_code:
+                query = query.where(MonitorHistory.stock_code == stock_code)
+
+            query = query.order_by(desc(MonitorHistory.triggered_at)).limit(limit)
+
+            records = session.execute(query).scalars().all()
+            return list(records)
 
 
 # 便捷函数

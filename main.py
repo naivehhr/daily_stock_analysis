@@ -330,6 +330,8 @@ def parse_arguments() -> argparse.Namespace:
         help='不保存分析上下文快照'
     )
 
+    # === 智能盯盘与交易策略系统（已移除） ===
+
     # === Backtest ===
     parser.add_argument(
         '--backtest',
@@ -878,6 +880,7 @@ def main() -> int:
                 override_region=effective_region,
             )
             return 0
+
 
         # 模式2: 定时任务模式
         if args.schedule or config.schedule_enabled:

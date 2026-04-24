@@ -28,7 +28,7 @@ class SystemConfigFieldSchema(BaseModel):
     is_required: bool
     is_editable: bool
     default_value: Optional[str] = None
-    options: List[str | SystemConfigOption] = Field(default_factory=list)
+    options: List[Any] = Field(default_factory=list)
     validation: Dict[str, Any] = Field(default_factory=dict)
     display_order: int
 

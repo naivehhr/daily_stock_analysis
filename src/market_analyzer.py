@@ -138,7 +138,7 @@ class MarketAnalyzer:
             getattr(getattr(self, "config", None), "report_language", "zh")
         )
 
-    def _get_market_scope_name(self, review_language: str | None = None) -> str:
+    def _get_market_scope_name(self, review_language: Optional[str] = None) -> str:
         review_language = review_language or self._get_review_language()
         if self.region == "us":
             return "US market"
@@ -205,7 +205,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 - Balanced: index divergence or low-volume consolidation; keep sizing controlled and wait for confirmation.
 - Defensive: indices weaken and laggards broaden; prioritize risk control and de-risking."""
 
-    def _get_strategy_markdown_block(self, review_language: str | None = None) -> str:
+    def _get_strategy_markdown_block(self, review_language: Optional[str] = None) -> str:
         review_language = review_language or self._get_review_language()
         if not (self.region == "cn" and review_language == "en"):
             return self.strategy.to_markdown_block()
@@ -215,7 +215,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 - **Leading Themes**: Focus on sectors with catalysts and sustained leadership while avoiding broadening weakness.
 """
 
-    def _get_market_mood_text(self, mood_key: str, review_language: str | None = None) -> str:
+    def _get_market_mood_text(self, mood_key: str, review_language: Optional[str] = None) -> str:
         review_language = review_language or self._get_review_language()
         if review_language == "en":
             mapping = {
